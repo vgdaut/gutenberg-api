@@ -1,54 +1,91 @@
-import { Dirent } from 'fs';
-import fsPromises from 'fs/promises';
-import { join } from 'path';
 import { Quad } from '@rdfjs/types';
-import { RdfXmlParser } from 'rdfxml-streaming-parser';
+import { RdfXmlParser } from '@vgdaut/rdfxml-streaming-parser';
+import https from 'https';
+import { join } from 'path';
+import tar from 'tar-stream';
+import bz2 from 'unbzip2-stream';
 import Book from './types/book';
 
-const rdfFilesPath = '/home/user/Downloads/rdf-files/cache/epub';
+export default class GutenbergLoader {
+    public mirrorUri = 'https://www.gutenberg.org';
+    // Ignoring 90907 because this is a stub ebook without any data
+    public readonly ignoredBooks = [90907];
+    // True when the method synchronizeDatabase is running
+    private running = false;
+    // Date of the RDF files archive at the time of the last synchronization
+    private lastDate = '';
 
-// fs.createReadStream(join(rdfFilesPath, '1', 'pg1.rdf'))
-//     .pipe(rdfParser)
-//     .on('data', console.log)
-//     .on('error', console.error)
-//     .on('end', () => console.log('All triples were parsed!'));
-
-fsPromises.opendir(rdfFilesPath)
-    .then(async dir => {
-        for await (const dirent of dir) {
-            const entryId = parseInt(dirent.name);
-            if (dirent.isDirectory() && !isNaN(entryId) && entryId > 0) { // is a valid entry
-                // if (dirent.name !== '100') continue;
-                processDirent(dirent);
-                // break;
-            }
+    public synchronizeDatabase(): void {
+        if (this.running) {
+            return;
         }
-    });
+        this.running = true;
 
-async function processDirent(dirent: Dirent): Promise<void> {
-    const entryIdStr = dirent.name;
-    const entryRdfPath = join(rdfFilesPath, entryIdStr, `pg${entryIdStr}.rdf`);
+        const extract = tar.extract();
 
-    const stats = await fsPromises.stat(entryRdfPath);
-    if (!stats.isFile()) {
-        return;
-    }
-    
-    const quads: Quad[] = [];
+        extract.on('entry', (headers, stream, next) => {
+            // After reading of file is finished, call next()
+            stream.on('end', next);
 
-    const fileHandle = await fsPromises.open(entryRdfPath);
-    fileHandle.createReadStream()
-        .pipe(new RdfXmlParser())
-        .on('data', (quad: Quad) => {
-            quads.push(quad);
-        })
-        .on('error', console.error)
-        .on('end', () => {
-            const book = Book.fromQuads(quads);
-            // Book.fromQuads also performs Creator.fromQuadsMultiple
-            // Thus, we can use book.creators
-            const creators = book.creators;
-            console.log({book});
+            if (headers.type !== 'file') {
+                stream.resume();
+                return;
+            }
+
+            const matches = headers.name.match(/pg([0-9]+)\.rdf/);
+            if (matches?.length !== 2) {
+                stream.resume();
+                return;
+            }
+
+            const bookIdStr = matches[1];
+            const bookId = parseInt(bookIdStr);
+            if (isNaN(bookId) || this.ignoredBooks.includes(bookId)) {
+                stream.resume();
+                return;
+            }
+
+            const quads: Quad[] = [];
+
+            stream
+                .pipe(new RdfXmlParser({ validateUri: false }))
+                .on('data', (quad: Quad) => {
+                    quads.push(quad);
+                })
+                .on('error', err => {
+                    console.error(`Cannot process a quad of ${bookIdStr}`);
+                    console.error(err);
+                    next();
+                })
+                .on('end', () => {
+                    try {
+                        const book = Book.fromQuads(quads);
+                        // console.log(book);
+                    } catch (err) {
+                        console.error(`Failed to create a Book instance of ${bookIdStr}:`);
+                        console.error(err);
+                    }
+                });
         });
+
+        // Extraction of files finished
+        extract.on('finish', () => {
+            this.running = false;
+        });
+
+        https.get(join(this.mirrorUri, 'cache', 'epub', 'feeds', 'rdf-files.tar.bz2'), res => {
+            const date = res.headers.date;
+
+            if (date !== this.lastDate) {
+                res.pipe(bz2()).pipe(extract);
+            }
+
+            if (typeof date === 'undefined') {
+                this.lastDate = '';
+            } else {
+                this.lastDate = date;
+            }
+        });
+    }
 
 }

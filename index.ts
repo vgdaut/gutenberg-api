@@ -1,8 +1,11 @@
 import { MongoClient } from 'mongodb';
 import app from './src/app';
+import GutenbergLoader from './src/data';
 
-const mongoUrl = 'mongodb://localhost:27017/';
+const mongoUrl = 'mongodb://localhost:27017/mainDb';
 const port = 8000;
+
+main();
 
 async function main() {
     const client = new MongoClient(mongoUrl);
@@ -16,6 +19,11 @@ async function main() {
     app.listen(port, () => {
         console.log(`Listening on port ${port}`);
     });
-}
 
-main();
+    const loader = new GutenbergLoader();
+    loader.synchronizeDatabase();
+    // Run the method every hour afterwards
+    setInterval(() => {
+        loader.synchronizeDatabase();
+    }, 3600);
+}
